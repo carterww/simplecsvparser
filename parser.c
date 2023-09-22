@@ -16,7 +16,7 @@
 /* Private function declarations */
 
 /* Responsible for flushing the buffer into carry and resetting the buffer */
-static void flush_buffer(char *buff, int bufflen, char **carry);
+static void flush_buffer(char *buff, unsigned int *bufflen, char **carry);
 /* Responsible for parsing a literal and returning the string */
 static char *handle_literal(FILE *csv, char *buff, char *after_literal);
 /* Allocation helpers */
@@ -69,10 +69,10 @@ void free_table(table *table) {
 }
 
 int csv_parse(const char *csv_path, parser_options options, table *result) {
-    int curr_row_num = 0;
-    int bufflen = 0;
+    unsigned int curr_row_num = 0;
+    unsigned int bufflen = 0;
     char buffer[BUFFER_SIZE];
-    char *carry; /* Temporary string used before writing to the struct */
+    char *carry = NULL; /* Temporary string used before writing to the struct */
     char c = 0;
 
     memset(buffer, 0, BUFFER_SIZE * sizeof(char));
@@ -81,8 +81,6 @@ int csv_parse(const char *csv_path, parser_options options, table *result) {
     if (csv == NULL)
         return errno;
     
-    printf("START: Parsing %s\n", csv_path);
-    printf("Going to %d, before first while loop\n", options.data_start_line);
     /* Loop to get to the data */
     while(curr_row_num < options.data_start_line) {
         c = fgetc(csv);
@@ -95,73 +93,71 @@ int csv_parse(const char *csv_path, parser_options options, table *result) {
         if (c == '\n')
             curr_row_num++;
     }
-    printf("At %d, after first while loop\n", curr_row_num);
 
     /* We ate char on data row last loop, so go back one */
     if (c != 0)
         fseek(csv, -1L, SEEK_CUR);
-    carry = NULL;
-    curr_row_num = 0;
 
-    printf("About to allocate table and first row\n");
     alloc_table(result);
     alloc_row(&(result->rows[0]), 1);
-    printf("Allocated table and first row\n");
 
-    int curr_field_count = 0;
+    unsigned int curr_field_count = 0;
+    curr_row_num = 0;
+    bool reached_data = false;
     while (1) {
 main_loop:
         c = fgetc(csv);
         if (feof(csv))
             goto cleanup;
         
-        switch (c) {
-            case '\"':
-                carry = handle_literal(csv, buffer, &c);
-                if (carry == NULL)
-                    goto error;
-                result->rows[curr_row_num].fields[curr_field_count++] = carry;
-                /* If first row, then we need to realloc the row
-                 * If not uniform column count, then we need to realloc the row
-                 */
-                if (curr_row_num == 0 || !(options.uniform_column_count))
-                    relloc_row(&(result->rows[curr_row_num]));
-                fseek(csv, -1L, SEEK_CUR);
-                goto main_loop;
-            case '\n':
-                /* If we are at the end of the line, then we need to realloc the table
-                 * and reset the field count
-                 */
-                flush_buffer(buffer, bufflen, &carry);
-                /* Don't increment curr_field_count because we started with one more than we actually had */
-                result->rows[curr_row_num].fields[curr_field_count++] = carry;
-                result->rows[curr_row_num].field_count = curr_field_count;
-                carry = NULL;
-                bufflen = 0;
-                realloc_table(result);
-                if (options.uniform_column_count)
-                    alloc_row(&(result->rows[curr_row_num + 1]), result->rows[0].field_count);
-                else 
-                    alloc_row(&(result->rows[curr_row_num + 1]), 1);
-                printf("In newline: Current row: %d, Current field: %d\n", curr_row_num, curr_field_count);
-                curr_field_count = 0;
-                curr_row_num++;
-                break;
-        }
-        if (bufflen == BUFFER_SIZE) {
-            flush_buffer(buffer, bufflen, &carry);
-            bufflen = 0;
-        }
-        if (c == options.delimiter) {
-            printf("%d: In delimiter: %s\n", curr_field_count, buffer);
-            flush_buffer(buffer, bufflen, &carry);
-            bufflen = 0;
+        if (c == '\"') {
+            carry = handle_literal(csv, buffer, &c);
+            if (carry == NULL)
+                goto error;
             result->rows[curr_row_num].fields[curr_field_count++] = carry;
-            printf("%d: In delimiter: %s\n", curr_field_count, carry);
+            carry = NULL;
+
+            if (curr_row_num == 0 || !(options.uniform_column_count))
+                relloc_row(&(result->rows[curr_row_num]));
+            goto main_loop;
+        }
+
+        if (c == '\n') {
+            if (!reached_data)
+                goto main_loop;
+            flush_buffer(buffer, &bufflen, &carry);
+
+            /* Don't increment curr_field_count because we started with one more than we actually had */
+            result->rows[curr_row_num].fields[curr_field_count++] = carry;
+            carry = NULL;
+            result->rows[curr_row_num].field_count = curr_field_count;
+
+            realloc_table(result);
+            if (options.uniform_column_count)
+                alloc_row(&(result->rows[++curr_row_num]), result->rows[0].field_count);
+            else {
+                alloc_row(&(result->rows[++curr_row_num]), 1);
+            }
+            curr_field_count = 0;
+            reached_data = false;
+            goto main_loop;
+        }
+        
+        if (bufflen == BUFFER_SIZE) {
+            flush_buffer(buffer, &bufflen, &carry);
+        }
+
+        if (c == options.delimiter) {
+            flush_buffer(buffer, &bufflen, &carry);
+            result->rows[curr_row_num].fields[curr_field_count++] = carry;
             carry = NULL;
             if (curr_row_num == 0 || !(options.uniform_column_count))
                 relloc_row(&(result->rows[curr_row_num]));
+            reached_data = false;
+        } else if (options.iltst && !reached_data && (c == ' ' || c == '\t')) {
+            goto main_loop;
         } else {
+            reached_data = true;
             buffer[bufflen++] = c;
         }
 
@@ -177,7 +173,7 @@ cleanup:
 }
 
 static char *handle_literal(FILE *csv, char *buff, char *after_literal) {
-    bool state = INSIDE_LITERAL;
+    bool reached_quote_in_literal = false;
     char c = '\"';
     char *carry = NULL;
     unsigned int bufflen = 0;
@@ -187,19 +183,18 @@ static char *handle_literal(FILE *csv, char *buff, char *after_literal) {
         if (feof(csv))
             return NULL;
         if (bufflen == BUFFER_SIZE) {
-            flush_buffer(buff, bufflen, &carry);
-            bufflen = 0;
+            flush_buffer(buff, &bufflen, &carry);
         }
         if (c == '\"') {
-            if (!(state & REACHED_QUOTE_IN_LITERAL)) {
-                state |= REACHED_QUOTE_IN_LITERAL;
-            } else if (state & REACHED_QUOTE_IN_LITERAL) {
+            if (!reached_quote_in_literal) {
+                reached_quote_in_literal = true;
+            } else {
+                reached_quote_in_literal = false;
                 buff[bufflen++] = c;
-                state &= ~REACHED_QUOTE_IN_LITERAL;
             }
         } else {
-            if (state & REACHED_QUOTE_IN_LITERAL) {
-                flush_buffer(buff, bufflen, &carry);
+            if (reached_quote_in_literal) {
+                flush_buffer(buff, &bufflen, &carry);
                 *after_literal = c; /* We char after literal, so main function will need it */
                 return carry;
             }
@@ -209,18 +204,19 @@ static char *handle_literal(FILE *csv, char *buff, char *after_literal) {
     }
 }
 
-static void flush_buffer(char *buff, int bufflen, char **carry) {
+static void flush_buffer(char *buff, unsigned int *bufflen, char **carry) {
     /* If NULL, then this is the first time we are flushing the buffer */
     if (*carry == NULL) {
-        *carry = malloc(bufflen * sizeof(char));
-        memcpy(*carry, buff, bufflen * sizeof(char));
+        *carry = calloc(*bufflen + 1, sizeof(char));
+        memcpy(*carry, buff, *bufflen * sizeof(char));
     /* We have flushed the buffer into carry before, so we need to realloc
      * by adding bufflen to the current size of carry */
     } else {
-        *carry = realloc(*carry, (strlen(*carry) + bufflen) * sizeof(char));
+        *carry = realloc(*carry, (strlen(*carry) + *bufflen + 1) * sizeof(char));
         strcat(*carry, buff);
     }
-    memset(buff, 0, bufflen * sizeof(char));
+    memset(buff, 0, *bufflen * sizeof(char));
+    *bufflen = 0;
 }
 
 static void alloc_table(table *table) {
@@ -229,7 +225,7 @@ static void alloc_table(table *table) {
 }
 
 static void alloc_row(row *row, unsigned int field_count) {
-    row->field_count = 1; /* We start with one field */
+    row->field_count = field_count; /* We start with one field */
     row->fields = calloc(field_count, sizeof(char *));
 }
 
