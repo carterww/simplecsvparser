@@ -7,13 +7,14 @@ There are two variants of the parser. Each have a very similar interface and cha
     2. **w_parser.c**
         - Note: Not started yet.
 There exists three main structures:
-    1. **table**: A structure to represent a collection of rows. It holds the pointer to the first row and the number of rows.
-    2. **row**: A structure to represent a row in a csv file. It holds the pointer to the first string and the number of strings.
-    3. parser_options: A structure that changes the behavior of the parser at runtime. This will be explained in it's [own section.](#parser-options)
+1. **table**: A structure to represent a collection of rows. It holds the pointer to the first row and the number of rows.
+2. **row**: A structure to represent a row in a csv file. It holds the pointer to the first string and the number of strings.
+3. parser_options: A structure that changes the behavior of the parser at runtime. This will be explained in it's [own section.](#parser-options)
+
 There are three main functions. These will be explained in [another section.](#interface)
-    1. set_default_parser_options()
-    2. free_table()
-    3. csv_parse()
+1. set_default_parser_options()
+2. free_table()
+3. csv_parse()
 
 # Parser Options
 Represented as a C struct:
@@ -52,10 +53,10 @@ Setting row_growth and field_growth to good values will greatly increase perform
 # Notes
 This has not been tested thoroughly. I just got it functional for my purposes and will update it/test it later. I'd like to add some options like allowing custom row implementations and such.
 CSVs are not a standardized format, so I made some assumptions while writing this:
-    1. Rows are terminated with either '\n' or "\r\n".
-        - '\r' is ignored in the parse.
-    2. If the delimiter appears in a field, the field must be enclosed in quotation marks. All characters in the quotes will be interpretted literally except quotes.
-        - To use quotes inside the literal, use double quotes. Ex) "hello, ""world""" gets parsed as hello, "world"
-        - The end of the quote is assumed to be the end of the field.
-    3. If your CSV file contains characters ranging outside of ASCII, you must use the w_char variant.
+1. Rows are terminated with either '\n' or "\r\n".
+   - '\r' is ignored in the parse.
+2. If the delimiter appears in a field, the field must be enclosed in quotation marks. All characters in the quotes will be interpretted literally except quotes.
+   - To use quotes inside the literal, use double quotes. Ex) "hello, ""world""" gets parsed as hello, "world"
+   - The end of the quote is assumed to be the end of the field.
+3. If your CSV file contains characters ranging outside of ASCII, you must use the w_char variant.
 
