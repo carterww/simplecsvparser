@@ -1,5 +1,5 @@
-# SimCSVParser
-SimCSVParser is a simple parser written in C that I wrote to use for a project. The goal was to crate a simple interface for reading csv files with some options I like. Simplicity and portability are the main characteristics of the parser. It currently only supports 1 byte characters, but my plan is to add a w_char variant for reading UTF-8 beyond ASCII.
+# SimpleCSVParser
+SimpleCSVParser is a simple parser written in C that I wrote to use for a project. The goal was to crate a simple interface for reading csv files with some options I like. Simplicity and portability are the main characteristics of the parser. It currently only supports 1 byte characters, but my plan is to add a w_char variant for reading UTF-8 beyond ASCII.
 
 # Implementation
 There are two variants of the parser. Each have a very similar interface and characteristics, one variant supports wide characters. I will use the parser.c variants throughout the doc.
