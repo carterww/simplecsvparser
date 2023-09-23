@@ -19,9 +19,10 @@ extern "C" {
 #define DELIMITER_SEMICOLON ';'
 #define DELIMITER_PIPE '|'
 
-/* I just use these in case, may end up deleting */
-#define ENCODING_ASCII "ASCII"
-#define ENCODING_UTF8 "UTF-8"
+/* Default options for the parser */
+#define BUFFER_SIZE 128
+#define ROW_GROWTH 8
+#define FIELD_GROWTH 4
 
 #ifdef __cplusplus
 }

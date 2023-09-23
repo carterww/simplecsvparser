@@ -1,17 +1,10 @@
-#include "include/simcsvparser/parser.h" /* I will fix this later */
-#include "include/simcsvparser/options.h"
+#include "parser.h"
+#include "options.h"
 #include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define BUFFER_SIZE 128
-
-#define INSIDE_LITERAL 0x1
-#define OUTSIDE_LITERAL 0x0
-
-#define REACHED_QUOTE_IN_LITERAL 0x2
 
 /* Private function declarations */
 
@@ -19,77 +12,84 @@
 static void flush_buffer(char *buff, unsigned int *bufflen, char **carry);
 /* Responsible for parsing a literal and returning the string */
 static char *handle_literal(FILE *csv, char *buff, char *after_literal);
+
 /* Allocation helpers */
 
-
 /* Responsible for allocating memory for the initial table */
-static void alloc_table(table *table);
+static int alloc_table(table *table);
 /* We use field count here because when uniform column count is true,
  * we can know how many fields we need to allocate for each row.
  * This allows us to only realloc first row then next rows can use it's size
  */
-static void alloc_row(row *row, unsigned int field_count);
+static int alloc_row(row *row, unsigned int field_count);
 /* Responsible for reallocating memory for the table by adding one row.
  * I may change the number of rows we allocate for later to be more efficient
  * but only after I've done some tests on it.
  */
-static void realloc_table(table *table);
+static int realloc_table(table *table, unsigned int grow);
 /* Responsible for reallocating memory for the row by adding one field.
  * This one I will probably change to be more efficient later. These
  * memcpys are going to be expensive.
  */
-static void relloc_row(row *row);
+static int relloc_row(row *row, unsigned int grow);
+/* We may overallocate memory for the table, so this function will
+ * reallocate the memory to fit the final table.
+ */
+static int fit_table(table *table, unsigned int row_count);
+/* We may overallocate memory for the row, so this function will
+ * reallocate the memory to fit the row to the final size.
+ */
+static int fit_fields(row *row, unsigned int field_count);
 
 int set_default_parser_options(parser_options *options) {
+    if (options == NULL)
+        return -1;
     options->delimiter = DELIMITER_COMMA;
-    strcpy(options->encoding, ENCODING_ASCII);
     options->iltst = true;
     options->uniform_column_count = true;
     options->data_start_line = 0;
-    return 0;
-}
-
-int w_set_default_parser_options(w_parser_options *options) {
-    options->delimiter = W_DELIMITER_COMMA;
-    strcpy(options->encoding, ENCODING_UTF8);
-    options->iltst = true;
-    options->uniform_column_count = true;
-    options->data_start_line = 0;
+    options->row_growth = ROW_GROWTH;
+    options->field_growth = FIELD_GROWTH;
     return 0;
 }
 
 void free_table(table *table) {
     for (int i = 0; i < table->row_count; i++) {
         for (int j = 0; j < table->rows[i].field_count; j++) {
-            free(table->rows[i].fields[j]);
+            if (table->rows[i].fields[j] != NULL)
+                free(table->rows[i].fields[j]);
         }
-        free(table->rows[i].fields);
+        if (table->rows[i].fields != NULL)
+            free(table->rows[i].fields);
     }
-    free(table->rows);
+    if (table->rows != NULL)
+        free(table->rows);
 }
 
 int csv_parse(const char *csv_path, parser_options options, table *result) {
-    unsigned int curr_row_num = 0;
-    unsigned int bufflen = 0;
-    char buffer[BUFFER_SIZE];
-    char *carry = NULL; /* Temporary string used before writing to the struct */
-    char c = 0;
-
-    memset(buffer, 0, BUFFER_SIZE * sizeof(char));
-
+    if (csv_path == NULL || result == NULL)
+        return -1;
     FILE *csv = fopen(csv_path, "r");
     if (csv == NULL)
         return errno;
     
+    unsigned int curr_row_num = 0;
+    unsigned int bufflen = 0;
+    char buffer[BUFFER_SIZE];
+    char c = 0;
+    memset(buffer, 0, BUFFER_SIZE * sizeof(char));
     /* Loop to get to the data */
     while(curr_row_num < options.data_start_line) {
         c = fgetc(csv);
         if (feof(csv))
             goto cleanup;
         /* Data hasn't started yet, so keep going */
-        if (c == '\"')
-            if (handle_literal(csv, buffer, &c) == NULL)
+        if (c == '\"') {
+            char *carry = handle_literal(csv, buffer, &c);
+            if (carry == NULL)
                 goto error;
+            free(carry);
+        }
         if (c == '\n')
             curr_row_num++;
     }
@@ -98,10 +98,13 @@ int csv_parse(const char *csv_path, parser_options options, table *result) {
     if (c != 0)
         fseek(csv, -1L, SEEK_CUR);
 
-    alloc_table(result);
-    alloc_row(&(result->rows[0]), 1);
+    if (alloc_table(result) != 0)
+        goto error;
+    if (alloc_row(&(result->rows[0]), 1) != 0)
+        goto error;
 
     unsigned int curr_field_count = 0;
+    char *carry = NULL; /* Temporary string used before writing to the struct */
     curr_row_num = 0;
     bool reached_data = false;
     while (1) {
@@ -117,26 +120,35 @@ main_loop:
             result->rows[curr_row_num].fields[curr_field_count++] = carry;
             carry = NULL;
 
-            if (curr_row_num == 0 || !(options.uniform_column_count))
-                relloc_row(&(result->rows[curr_row_num]));
+            if (curr_field_count >= result->rows[curr_row_num].field_count &&
+                    (curr_row_num == 0 || !(options.uniform_column_count)))
+                if (relloc_row(&(result->rows[curr_row_num]), options.field_growth) != 0)
+                    goto error;
             goto main_loop;
         }
-
+        if (c == '\r') /* Handle windows line endings */
+            continue;
         if (c == '\n') {
             if (!reached_data)
                 goto main_loop;
             flush_buffer(buffer, &bufflen, &carry);
 
-            /* Don't increment curr_field_count because we started with one more than we actually had */
             result->rows[curr_row_num].fields[curr_field_count++] = carry;
             carry = NULL;
+            if (fit_fields(&(result->rows[curr_row_num]), curr_field_count) != 0)
+                goto error;
             result->rows[curr_row_num].field_count = curr_field_count;
 
-            realloc_table(result);
-            if (options.uniform_column_count)
-                alloc_row(&(result->rows[++curr_row_num]), result->rows[0].field_count);
-            else {
-                alloc_row(&(result->rows[++curr_row_num]), 1);
+            if (curr_row_num + 1 >= result->row_count) {
+                if (realloc_table(result, options.row_growth) != 0)
+                    goto error;
+            }
+            if (options.uniform_column_count) {
+                if (alloc_row(&(result->rows[++curr_row_num]), result->rows[0].field_count) != 0)
+                    goto error;
+            } else {
+                if (alloc_row(&(result->rows[++curr_row_num]), 1) != 0)
+                    goto error;
             }
             curr_field_count = 0;
             reached_data = false;
@@ -151,8 +163,11 @@ main_loop:
             flush_buffer(buffer, &bufflen, &carry);
             result->rows[curr_row_num].fields[curr_field_count++] = carry;
             carry = NULL;
-            if (curr_row_num == 0 || !(options.uniform_column_count))
-                relloc_row(&(result->rows[curr_row_num]));
+            if (curr_field_count >= result->rows[curr_row_num].field_count &&
+                    (curr_row_num == 0 || !(options.uniform_column_count))) {
+                if (relloc_row(&(result->rows[curr_row_num]), options.field_growth) != 0)
+                    goto error;
+            }
             reached_data = false;
         } else if (options.iltst && !reached_data && (c == ' ' || c == '\t')) {
             goto main_loop;
@@ -165,9 +180,13 @@ main_loop:
 
 error:
     fclose(csv);
+    free_table(result);
     return -1;
 cleanup:
     fclose(csv);
+    if (result->rows[curr_row_num].fields != NULL)
+        free(result->rows[curr_row_num].fields); /* This was causing a leak */
+    fit_table(result, curr_row_num);
     result->row_count = curr_row_num;
     return 0;
 }
@@ -192,14 +211,13 @@ static char *handle_literal(FILE *csv, char *buff, char *after_literal) {
                 reached_quote_in_literal = false;
                 buff[bufflen++] = c;
             }
-        } else {
-            if (reached_quote_in_literal) {
-                flush_buffer(buff, &bufflen, &carry);
-                *after_literal = c; /* We char after literal, so main function will need it */
-                return carry;
-            }
-            buff[bufflen++] = c;
+            continue;
+        } else if (reached_quote_in_literal) {
+            flush_buffer(buff, &bufflen, &carry);
+            *after_literal = c; /* We char after literal, so main function will need it */
+            return carry;
         }
+        buff[bufflen++] = c;
 
     }
 }
@@ -208,33 +226,70 @@ static void flush_buffer(char *buff, unsigned int *bufflen, char **carry) {
     /* If NULL, then this is the first time we are flushing the buffer */
     if (*carry == NULL) {
         *carry = calloc(*bufflen + 1, sizeof(char));
-        memcpy(*carry, buff, *bufflen * sizeof(char));
+        memcpy(*carry, buff, *bufflen);
     /* We have flushed the buffer into carry before, so we need to realloc
      * by adding bufflen to the current size of carry */
     } else {
-        *carry = realloc(*carry, (strlen(*carry) + *bufflen + 1) * sizeof(char));
+        *carry = realloc(*carry, strlen(*carry) + *bufflen + 1);
         strcat(*carry, buff);
     }
-    memset(buff, 0, *bufflen * sizeof(char));
+    memset(buff, 0, *bufflen);
     *bufflen = 0;
 }
 
-static void alloc_table(table *table) {
-    table->row_count = 1; /* We start with one row */
-    table->rows = calloc(1, sizeof(row));
+static int alloc_table(table *table) {
+    row *ptr = calloc(1, sizeof(row));
+    if (ptr != NULL) {
+        table->rows = ptr;
+        table->row_count = 1;
+        return 0;
+    }
+    return -1;
 }
 
-static void alloc_row(row *row, unsigned int field_count) {
-    row->field_count = field_count; /* We start with one field */
-    row->fields = calloc(field_count, sizeof(char *));
+static int alloc_row(row *row, unsigned int field_count) {
+    char **ptr = calloc(field_count, sizeof(char *));
+    if (ptr != NULL) {
+        row->fields = ptr;
+        row->field_count = field_count;
+        return 0;
+    }
+    return -1;
 }
 
-static void realloc_table(table *table) {
-    table->row_count++;
-    table->rows = realloc(table->rows, table->row_count * sizeof(row));
+static int realloc_table(table *table, unsigned int grow) {
+    row *ptr = realloc(table->rows, (table->row_count + grow) * sizeof(row));
+    if (ptr != NULL) {
+        table->rows = ptr;
+        table->row_count += grow;
+        return 0;
+    }
+    return -1;
 }
 
-static void relloc_row(row *row) {
-    row->field_count++;
-    row->fields = realloc(row->fields, row->field_count * sizeof(char *));
+static int relloc_row(row *row, unsigned int grow) {
+    char **ptr = realloc(row->fields, (row->field_count + grow) * sizeof(char *));
+    if (ptr != NULL) {
+        row->field_count += grow;
+        row->fields = ptr;
+        return 0;
+    }
+    return -1;
 }
+
+static int fit_fields(row *row, unsigned int field_count) {
+    char **ptr = realloc(row->fields, field_count * sizeof(char *));
+    if (ptr != NULL) {
+        row->fields = ptr;
+        return 0;
+    }
+    return -1;
+}
+ static int fit_table(table *table, unsigned int row_count) {
+    row *ptr = realloc(table->rows, row_count * sizeof(row));
+    if (ptr != NULL) {
+        table->rows = ptr;
+        return 0;
+    }
+    return -1;
+ }
